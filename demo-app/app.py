@@ -1,35 +1,26 @@
-"""Demo Cloud Run app with intentional OOM trigger for hackathon demo."""
+"""Demo Cloud Run app — realistic workload with a hidden memory leak."""
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-_leak = []
+# Bug: unbounded cache with no eviction — will OOM under sustained load
+_result_cache = {}
+
 
 @app.route("/")
 def health():
-    return jsonify(status="ok", memory_items=len(_leak))
+    return jsonify(status="ok", cached_items=len(_result_cache))
+
 
 @app.route("/work")
-def normal_work():
-    result = sum(range(100000))
-    return jsonify(status="ok", result=result)
+def work():
+    n = int(request.args.get("n", 100000))
+    result = sum(range(n))
+    # Bug: caches every unique request forever, never evicts
+    _result_cache[n] = bytearray(1024 * 1024)  # 1MB per cached entry
+    return jsonify(status="ok", result=result, cached=len(_result_cache))
 
-@app.route("/leak")
-def trigger_leak():
-    chunk = bytearray(50 * 1024 * 1024)  # 50MB per call
-    _leak.append(chunk)
-    return jsonify(
-        status="leaking",
-        chunks=len(_leak),
-        total_mb=len(_leak) * 50,
-    )
-
-@app.route("/oom")
-def trigger_oom():
-    blocks = []
-    while True:
-        blocks.append(bytearray(100 * 1024 * 1024))  # 100MB chunks
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

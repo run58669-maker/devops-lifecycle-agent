@@ -65,20 +65,20 @@ def fetch_cloud_run_logs(
 
 
 def fetch_monitoring_alerts(project_id: str = "") -> dict:
-    """Fetch active Cloud Monitoring alert incidents.
+    """Fetch recent Cloud Monitoring alert incidents (open or recently closed).
 
     Args:
         project_id: GCP project ID. Uses GCP_PROJECT_ID env var if empty.
 
     Returns:
-        Dictionary with active alert incidents.
+        Dictionary with active/recent alert incidents.
     """
     project_id = project_id or os.environ.get("GCP_PROJECT_ID", "")
     if not project_id:
         return {"error": "GCP_PROJECT_ID not set"}
 
     cmd = [
-        "gcloud", "alpha", "monitoring", "policies", "list",
+        "gcloud", "monitoring", "alerts", "list",
         f"--project={project_id}",
         "--format=json",
     ]
@@ -86,22 +86,41 @@ def fetch_monitoring_alerts(project_id: str = "") -> dict:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            return {"error": result.stderr.strip(), "alerts": []}
+            # Fallback: query Cloud Run memory metrics directly
+            metrics_cmd = [
+                "gcloud", "monitoring", "metrics", "list",
+                f"--project={project_id}",
+                "--filter=metric.type=run.googleapis.com/container/memory/utilizations",
+                "--format=json",
+                "--limit=5",
+            ]
+            metrics_result = subprocess.run(
+                metrics_cmd, capture_output=True, text=True, timeout=30,
+            )
+            if metrics_result.returncode == 0 and metrics_result.stdout.strip():
+                return {
+                    "project": project_id,
+                    "source": "metrics_fallback",
+                    "data": json.loads(metrics_result.stdout),
+                }
+            return {"error": result.stderr.strip(), "incidents": []}
 
-        policies = json.loads(result.stdout) if result.stdout.strip() else []
-        alerts = []
-        for p in policies:
-            alerts.append({
-                "name": p.get("displayName", ""),
-                "enabled": p.get("enabled", False),
-                "conditions": [
-                    c.get("displayName", "") for c in p.get("conditions", [])
-                ],
+        incidents = json.loads(result.stdout) if result.stdout.strip() else []
+        parsed = []
+        for inc in incidents:
+            parsed.append({
+                "name": inc.get("name", ""),
+                "state": inc.get("state", ""),
+                "severity": inc.get("severity", ""),
+                "started": inc.get("startedAt", ""),
+                "summary": inc.get("summary", ""),
+                "resource": inc.get("resourceDisplayName", ""),
+                "policy": inc.get("policyName", ""),
             })
 
-        return {"project": project_id, "count": len(alerts), "alerts": alerts}
+        return {"project": project_id, "count": len(parsed), "incidents": parsed}
     except Exception as e:
-        return {"error": str(e), "alerts": []}
+        return {"error": str(e), "incidents": []}
 
 
 def fetch_recent_deploys(
@@ -178,34 +197,38 @@ def create_github_pr(
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         branch_name = f"fix/incident-{ts}"
 
-    repo_dir = os.environ.get("DEMO_REPO_DIR", "")
-    if not repo_dir:
-        return {"error": "DEMO_REPO_DIR not set", "pr_url": ""}
+    repo_dir = os.environ.get(
+        "DEMO_REPO_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "demo-app"),
+    )
+
+    errors = []
+
+    def _run(cmd):
+        r = subprocess.run(cmd, cwd=repo_dir, capture_output=True, text=True)
+        if r.returncode != 0:
+            errors.append(f"cmd={cmd[0:3]}: {r.stderr.strip()}")
+        return r
 
     try:
-        subprocess.run(
-            ["git", "checkout", "-b", branch_name],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
+        _run(["git", "checkout", "main"])
+        _run(["git", "pull", "--rebase"])
+
+        checkout = _run(["git", "checkout", "-b", branch_name])
+        if checkout.returncode != 0:
+            _run(["git", "checkout", branch_name])
 
         if file_changes:
             changes = json.loads(file_changes)
             for change in changes:
                 filepath = os.path.join(repo_dir, change["path"])
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(change["content"])
 
-        subprocess.run(
-            ["git", "add", "-A"], cwd=repo_dir, capture_output=True, text=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", title],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-        subprocess.run(
-            ["git", "push", "-u", "origin", branch_name],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
+        _run(["git", "add", "-A"])
+        _run(["git", "commit", "-m", title])
+        _run(["git", "push", "-u", "origin", branch_name])
 
         result = subprocess.run(
             ["gh", "pr", "create", "--title", title, "--body", body],
@@ -213,13 +236,24 @@ def create_github_pr(
         )
 
         pr_url = result.stdout.strip() if result.returncode == 0 else ""
+
+        # Always return to main branch
+        subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+
         return {
             "status": "created" if pr_url else "failed",
             "pr_url": pr_url,
             "branch": branch_name,
-            "error": result.stderr.strip() if not pr_url else "",
+            "errors": errors if errors else [],
         }
     except Exception as e:
+        subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
         return {"error": str(e), "pr_url": ""}
 
 
