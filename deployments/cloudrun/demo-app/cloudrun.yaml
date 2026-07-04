@@ -1,0 +1,12 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: demo-app
+spec:
+  template:
+    spec:
+      containers:
+      - image: asia-northeast1-docker.pkg.dev/project-92324467-359f-463c-bb7/cloud-run-source-deploy/demo-app@sha256:df54b1f44bdb4a7244936d28a21ad780df3a3d88e89d9d214463fa24495c3e02
+        resources:
+          limits:
+            memory: 256Mi

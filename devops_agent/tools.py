@@ -2,8 +2,12 @@
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
+
+_GCLOUD = shutil.which("gcloud.cmd") or shutil.which("gcloud") or "gcloud"
 
 
 def fetch_cloud_run_logs(
@@ -32,7 +36,7 @@ def fetch_cloud_run_logs(
     )
 
     cmd = [
-        "gcloud", "logging", "read", filter_str,
+        _GCLOUD, "logging", "read", filter_str,
         f"--project={project_id}",
         f"--limit={limit}",
         "--format=json",
@@ -78,7 +82,7 @@ def fetch_monitoring_alerts(project_id: str = "") -> dict:
         return {"error": "GCP_PROJECT_ID not set"}
 
     cmd = [
-        "gcloud", "monitoring", "alerts", "list",
+        _GCLOUD, "alpha", "monitoring", "policies", "list",
         f"--project={project_id}",
         "--format=json",
     ]
@@ -86,41 +90,23 @@ def fetch_monitoring_alerts(project_id: str = "") -> dict:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            # Fallback: query Cloud Run memory metrics directly
-            metrics_cmd = [
-                "gcloud", "monitoring", "metrics", "list",
-                f"--project={project_id}",
-                "--filter=metric.type=run.googleapis.com/container/memory/utilizations",
-                "--format=json",
-                "--limit=5",
-            ]
-            metrics_result = subprocess.run(
-                metrics_cmd, capture_output=True, text=True, timeout=30,
-            )
-            if metrics_result.returncode == 0 and metrics_result.stdout.strip():
-                return {
-                    "project": project_id,
-                    "source": "metrics_fallback",
-                    "data": json.loads(metrics_result.stdout),
-                }
-            return {"error": result.stderr.strip(), "incidents": []}
+            return {"error": result.stderr.strip(), "policies": []}
 
-        incidents = json.loads(result.stdout) if result.stdout.strip() else []
+        policies = json.loads(result.stdout) if result.stdout.strip() else []
         parsed = []
-        for inc in incidents:
+        for p in policies:
             parsed.append({
-                "name": inc.get("name", ""),
-                "state": inc.get("state", ""),
-                "severity": inc.get("severity", ""),
-                "started": inc.get("startedAt", ""),
-                "summary": inc.get("summary", ""),
-                "resource": inc.get("resourceDisplayName", ""),
-                "policy": inc.get("policyName", ""),
+                "name": p.get("name", ""),
+                "displayName": p.get("displayName", ""),
+                "enabled": p.get("enabled", False),
+                "conditions": [
+                    c.get("displayName", "") for c in p.get("conditions", [])
+                ],
             })
 
-        return {"project": project_id, "count": len(parsed), "incidents": parsed}
+        return {"project": project_id, "count": len(parsed), "policies": parsed}
     except Exception as e:
-        return {"error": str(e), "incidents": []}
+        return {"error": str(e), "policies": []}
 
 
 def fetch_recent_deploys(
@@ -140,7 +126,7 @@ def fetch_recent_deploys(
     region = os.environ.get("GCP_REGION", "asia-northeast1")
 
     cmd = [
-        "gcloud", "run", "revisions", "list",
+        _GCLOUD, "run", "revisions", "list",
         f"--service={service_name}",
         f"--project={project_id}",
         f"--region={region}",
@@ -197,9 +183,8 @@ def create_github_pr(
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         branch_name = f"fix/incident-{ts}"
 
-    repo_dir = os.environ.get(
-        "DEMO_REPO_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "demo-app"),
+    repo_dir = os.environ.get("DEMO_REPO_DIR") or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
     )
 
     errors = []
