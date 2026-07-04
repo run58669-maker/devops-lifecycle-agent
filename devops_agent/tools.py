@@ -68,20 +68,20 @@ def fetch_cloud_run_logs(
 
 
 def fetch_monitoring_alerts(project_id: str = "") -> dict:
-    """Fetch recent Cloud Monitoring alert incidents (open or recently closed).
+    """Fetch Cloud Monitoring alert policies for the project.
 
     Args:
         project_id: GCP project ID. Uses GCP_PROJECT_ID env var if empty.
 
     Returns:
-        Dictionary with active/recent alert incidents.
+        Dictionary with alert policies and their conditions.
     """
     project_id = project_id or os.environ.get("GCP_PROJECT_ID", "")
     if not project_id:
         return {"error": "GCP_PROJECT_ID not set"}
 
     cmd = [
-        _GCLOUD, "monitoring", "alerts", "list",
+        _GCLOUD, "alpha", "monitoring", "policies", "list",
         f"--project={project_id}",
         "--format=json",
     ]
@@ -89,41 +89,22 @@ def fetch_monitoring_alerts(project_id: str = "") -> dict:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            # Fallback: query Cloud Run memory metrics directly
-            metrics_cmd = [
-                _GCLOUD, "monitoring", "metrics", "list",
-                f"--project={project_id}",
-                "--filter=metric.type=run.googleapis.com/container/memory/utilizations",
-                "--format=json",
-                "--limit=5",
-            ]
-            metrics_result = subprocess.run(
-                metrics_cmd, capture_output=True, text=True, timeout=30,
-            )
-            if metrics_result.returncode == 0 and metrics_result.stdout.strip():
-                return {
-                    "project": project_id,
-                    "source": "metrics_fallback",
-                    "data": json.loads(metrics_result.stdout),
-                }
-            return {"error": result.stderr.strip(), "incidents": []}
+            return {"error": result.stderr.strip(), "policies": []}
 
-        incidents = json.loads(result.stdout) if result.stdout.strip() else []
+        policies = json.loads(result.stdout) if result.stdout.strip() else []
         parsed = []
-        for inc in incidents:
+        for p in policies:
+            conditions = p.get("conditions", [])
             parsed.append({
-                "name": inc.get("name", ""),
-                "state": inc.get("state", ""),
-                "severity": inc.get("severity", ""),
-                "started": inc.get("startedAt", ""),
-                "summary": inc.get("summary", ""),
-                "resource": inc.get("resourceDisplayName", ""),
-                "policy": inc.get("policyName", ""),
+                "name": p.get("name", ""),
+                "displayName": p.get("displayName", ""),
+                "enabled": p.get("enabled", False),
+                "conditions": [c.get("displayName", "") for c in conditions],
             })
 
-        return {"project": project_id, "count": len(parsed), "incidents": parsed}
+        return {"project": project_id, "count": len(parsed), "policies": parsed}
     except Exception as e:
-        return {"error": str(e), "incidents": []}
+        return {"error": str(e), "policies": []}
 
 
 def fetch_recent_deploys(
