@@ -2,8 +2,11 @@
 
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime, timezone
+
+_GCLOUD = shutil.which("gcloud.cmd") or shutil.which("gcloud") or "gcloud"
 
 
 def fetch_cloud_run_logs(
@@ -32,7 +35,7 @@ def fetch_cloud_run_logs(
     )
 
     cmd = [
-        "gcloud", "logging", "read", filter_str,
+        _GCLOUD, "logging", "read", filter_str,
         f"--project={project_id}",
         f"--limit={limit}",
         "--format=json",
@@ -78,7 +81,7 @@ def fetch_monitoring_alerts(project_id: str = "") -> dict:
         return {"error": "GCP_PROJECT_ID not set"}
 
     cmd = [
-        "gcloud", "monitoring", "alerts", "list",
+        _GCLOUD, "monitoring", "alerts", "list",
         f"--project={project_id}",
         "--format=json",
     ]
@@ -88,7 +91,7 @@ def fetch_monitoring_alerts(project_id: str = "") -> dict:
         if result.returncode != 0:
             # Fallback: query Cloud Run memory metrics directly
             metrics_cmd = [
-                "gcloud", "monitoring", "metrics", "list",
+                _GCLOUD, "monitoring", "metrics", "list",
                 f"--project={project_id}",
                 "--filter=metric.type=run.googleapis.com/container/memory/utilizations",
                 "--format=json",
@@ -140,7 +143,7 @@ def fetch_recent_deploys(
     region = os.environ.get("GCP_REGION", "asia-northeast1")
 
     cmd = [
-        "gcloud", "run", "revisions", "list",
+        _GCLOUD, "run", "revisions", "list",
         f"--service={service_name}",
         f"--project={project_id}",
         f"--region={region}",
@@ -197,9 +200,8 @@ def create_github_pr(
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         branch_name = f"fix/incident-{ts}"
 
-    repo_dir = os.environ.get(
-        "DEMO_REPO_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "demo-app"),
+    repo_dir = os.environ.get("DEMO_REPO_DIR") or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
     )
 
     errors = []
